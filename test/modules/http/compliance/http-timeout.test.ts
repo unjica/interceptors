@@ -119,6 +119,7 @@ it('respects a "setTimeout()" on a handled request', async () => {
 
   const setTimeoutCallback = vi.fn()
   const responseListener = vi.fn()
+  const responseErrorListener = vi.fn()
   const timeoutListener = vi.fn()
   const errorListener = vi.fn()
   const closeListener = vi.fn()
@@ -140,7 +141,10 @@ it('respects a "setTimeout()" on a handled request', async () => {
   request.setTimeout(10, setTimeoutCallback)
 
   request
-    .on('response', responseListener)
+    .on('response', (response) => {
+      responseListener(response)
+      response.on('error', responseErrorListener)
+    })
     .on('timeout', () => {
       timeoutListener()
       request.destroy()
@@ -153,12 +157,14 @@ it('respects a "setTimeout()" on a handled request', async () => {
   expect(request.destroyed).toBe(true)
   expect(timeoutListener).toHaveBeenCalledTimes(1)
   expect(setTimeoutCallback).toHaveBeenCalledTimes(1)
-  expect(errorListener).toHaveBeenCalledWith(
-    expect.objectContaining({
-      code: 'ECONNRESET',
-    })
+  // The response headers arrive before the pending body times out.
+  expect(errorListener).not.toHaveBeenCalled()
+  expect(responseListener).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ statusCode: 200 })
   )
-  expect(responseListener).not.toHaveBeenCalled()
+  expect(responseErrorListener).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ code: 'ECONNRESET', message: 'aborted' })
+  )
 })
 
 it('respects a "setTimeout()" on a bypassed request', async () => {
@@ -207,12 +213,16 @@ it('respects the "socket.setTimeout()" for a handled request', async () => {
   const request = http.get(httpServer.http.url('/resource').href)
 
   const responseListener = vi.fn()
+  const responseErrorListener = vi.fn()
   const setTimeoutCallback = vi.fn()
   const errorListener = vi.fn()
   const closeListener = vi.fn()
 
   request
-    .on('response', responseListener)
+    .on('response', (response) => {
+      responseListener(response)
+      response.on('error', responseErrorListener)
+    })
     .on('socket', (socket) => {
       /**
        * @note Setting timeout on the socket directly will NOT add the "timeout"
@@ -229,12 +239,14 @@ it('respects the "socket.setTimeout()" for a handled request', async () => {
 
   expect.soft(request.destroyed).toBe(true)
   expect.soft(setTimeoutCallback).toHaveBeenCalledTimes(1)
-  expect.soft(errorListener).toHaveBeenCalledWith(
-    expect.objectContaining({
-      code: 'ECONNRESET',
-    })
+  // The response headers arrive before the pending body times out.
+  expect(errorListener).not.toHaveBeenCalled()
+  expect(responseListener).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ statusCode: 200 })
   )
-  expect.soft(responseListener).not.toHaveBeenCalled()
+  expect(responseErrorListener).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ code: 'ECONNRESET', message: 'aborted' })
+  )
 })
 
 it('respects the "socket.setTimeout()" for a bypassed request', async () => {

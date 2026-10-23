@@ -110,6 +110,55 @@ it('supports ReadableStream as a mocked response', async () => {
   await expect(response.text()).resolves.toBe('hello world')
 })
 
+it.each(['fetch', 'http.get', 'http.request'])(
+  'sends mocked response headers before the first body chunk with %s',
+  async (client) => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    interceptor.on('request', ({ controller }) => {
+      controller.respondWith(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamController = controller
+            },
+          }),
+          {
+            status: 201,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }
+        )
+      )
+    })
+
+    let response: Response | undefined
+    const responsePromise = (
+      client === 'fetch'
+        ? fetch('http://localhost/stream')
+        : toWebResponse(
+            client === 'http.get'
+              ? http.get('http://localhost/stream')
+              : http.request('http://localhost/stream').end()
+          ).then(([response]) => response)
+    ).then((value) => {
+      response = value
+      return value
+    })
+
+    try {
+      // No body data is enqueued until the client has received the headers.
+      await expect.poll(() => response?.status).toBe(201)
+      expect(response!.headers.get('content-type')).toBe('text/event-stream')
+      expect(response!.headers.has('transfer-encoding')).toBe(false)
+      streamController.enqueue(encoder.encode('data: hello\n\n'))
+    } finally {
+      // Release pending requests even when the headers assertion fails.
+      streamController.close()
+      await responsePromise
+    }
+    await expect(response!.text()).resolves.toBe('data: hello\n\n')
+  }
+)
+
 it('supports delays between the mock response stream chunks', async () => {
   interceptor.on('request', ({ controller }) => {
     const stream = new ReadableStream({
@@ -209,28 +258,21 @@ it('handles immediate mock response stream errors as response errors', async () 
     response.on('data', responseDataListener).on('error', responseErrorListener)
   })
 
-  /**
-   * @note Response stream errors are handled differently in Node.js
-   * depending on whether the response headers were flushed by the server.
-   * Normally, Node.js buffers the message headers until (1) response ends;
-   * (2) the first response chunk is sent. We maintain that default behavior
-   * for performance considerations. Whether headers are flushed has no effect
-   * on the client, that's an implementation detail.
-   */
+  // Headers have already reached the client, so even an immediate stream
+  // error aborts the response instead of failing the request.
   await expect
-    .poll(() => requestErrorListener)
+    .poll(() => responseErrorListener)
     .toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        code: 'ECONNRESET',
-        message: 'socket hang up',
-      })
+      expect.objectContaining({ code: 'ECONNRESET', message: 'aborted' })
     )
   expect.soft(request.destroyed).toBe(true)
-  expect.soft(requestResponseListener).not.toHaveBeenCalled()
+  expect.soft(requestResponseListener).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ statusCode: 200, statusMessage: 'OK' })
+  )
+  expect.soft(requestErrorListener).not.toHaveBeenCalled()
   expect.soft(requestCloseListener).toHaveBeenCalledOnce()
 
   expect.soft(responseDataListener).not.toHaveBeenCalled()
-  expect.soft(responseErrorListener).not.toHaveBeenCalled()
 
   expect.soft(socketErrorListener).not.toHaveBeenCalled()
   expect.soft(socketCloseListener).toHaveBeenCalledExactlyOnceWith(false)
@@ -285,11 +327,7 @@ it('handles delayed mock response stream errors as response errors', async () =>
     const stream = new ReadableStream({
       async start(controller) {
         controller.enqueue(encoder.encode('first-chunk'))
-        /**
-         * @note Pause is important here so that Node.js flushes the response headers
-         * before the stream errors. If the error happens immediately, Node.js will
-         * optimize for that and translate it into the request error.
-         */
+        // Allow the first chunk to reach the client before the stream errors.
         await setTimeout(100)
         controller.error(streamError)
       },

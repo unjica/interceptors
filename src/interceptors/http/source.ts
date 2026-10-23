@@ -731,13 +731,13 @@ export class NodeHttpRequestSource extends Interceptor<HttpRequestEventMap> {
     )
 
     /**
-     * @note Override the socket's `_destroy` before writing the response body.
+     * @note Override the socket's `_destroy` before flushing response headers.
      * The underlying TCP handle (from `socket.connect()`) makes `_destroy` async
      * (`_handle.close()` callback), which delays the 'error' event. Since the real
      * TCP connection is irrelevant for mocked responses, take the synchronous path
      * so that user-initiated `response.destroy(error)` emits the error promptly.
-     * This must happen before `serverResponse.end()` because the HTTP parser may
-     * fire the 'response' event synchronously during `socket.push()`.
+     * This must happen before `serverResponse.flushHeaders()` because the HTTP
+     * parser may fire the 'response' event synchronously during `socket.push()`.
      */
     socket._destroy = function (
       error: Error | null,
@@ -789,6 +789,8 @@ export class NodeHttpRequestSource extends Interceptor<HttpRequestEventMap> {
     }
 
     if (response.body) {
+      // Deliver the status and headers even if the stream has no chunks yet.
+      serverResponse.flushHeaders()
       const reader = response.body.getReader()
 
       try {
