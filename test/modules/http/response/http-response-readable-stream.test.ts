@@ -258,21 +258,28 @@ it('handles immediate mock response stream errors as response errors', async () 
     response.on('data', responseDataListener).on('error', responseErrorListener)
   })
 
-  // Headers have already reached the client, so even an immediate stream
-  // error aborts the response instead of failing the request.
+  /**
+   * @note Response stream errors are handled differently in Node.js
+   * depending on whether the response headers were flushed by the server.
+   * Normally, Node.js buffers the message headers until (1) response ends;
+   * (2) the first response chunk is sent. We maintain that default behavior
+   * for performance considerations. Whether headers are flushed has no effect
+   * on the client, that's an implementation detail.
+   */
   await expect
-    .poll(() => responseErrorListener)
+    .poll(() => requestErrorListener)
     .toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ code: 'ECONNRESET', message: 'aborted' })
+      expect.objectContaining({
+        code: 'ECONNRESET',
+        message: 'socket hang up',
+      })
     )
   expect.soft(request.destroyed).toBe(true)
-  expect.soft(requestResponseListener).toHaveBeenCalledExactlyOnceWith(
-    expect.objectContaining({ statusCode: 200, statusMessage: 'OK' })
-  )
-  expect.soft(requestErrorListener).not.toHaveBeenCalled()
+  expect.soft(requestResponseListener).not.toHaveBeenCalled()
   expect.soft(requestCloseListener).toHaveBeenCalledOnce()
 
   expect.soft(responseDataListener).not.toHaveBeenCalled()
+  expect.soft(responseErrorListener).not.toHaveBeenCalled()
 
   expect.soft(socketErrorListener).not.toHaveBeenCalled()
   expect.soft(socketCloseListener).toHaveBeenCalledExactlyOnceWith(false)
@@ -327,7 +334,11 @@ it('handles delayed mock response stream errors as response errors', async () =>
     const stream = new ReadableStream({
       async start(controller) {
         controller.enqueue(encoder.encode('first-chunk'))
-        // Allow the first chunk to reach the client before the stream errors.
+        /**
+         * @note Pause is important here so that Node.js flushes the response headers
+         * before the stream errors. If the error happens immediately, Node.js will
+         * optimize for that and translate it into the request error.
+         */
         await setTimeout(100)
         controller.error(streamError)
       },

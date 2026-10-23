@@ -789,13 +789,23 @@ export class NodeHttpRequestSource extends Interceptor<HttpRequestEventMap> {
     }
 
     if (response.body) {
-      // Deliver the status and headers even if the stream has no chunks yet.
-      serverResponse.flushHeaders()
       const reader = response.body.getReader()
 
       try {
+        const firstRead = reader.read()
+        // Keep Node's default buffering for immediately available chunks, EOF,
+        // or errors. A macrotask boundary lets those reads settle before flushing
+        // headers for an idle stream whose first chunk may depend on the client.
+        const flushHeaders = setImmediate(() => serverResponse.flushHeaders())
+        let result: ReadableStreamReadResult<Uint8Array>
+        try {
+          result = await firstRead
+        } finally {
+          clearImmediate(flushHeaders)
+        }
+
         while (true) {
-          const { done, value } = await reader.read()
+          const { done, value } = result
 
           if (done) {
             serverResponse.end()
@@ -807,6 +817,7 @@ export class NodeHttpRequestSource extends Interceptor<HttpRequestEventMap> {
               serverResponse.once('drain', resolve)
             })
           }
+          result = await reader.read()
         }
       } catch {
         /**
